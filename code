@@ -1,0 +1,343 @@
+```python
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+import qrcode
+
+client = MongoClient("mongodb://localhost:27017/")
+db = client["inventory_db"]
+
+class LoginWindow(tk.Toplevel):
+    def __init__(self, master, on_success):
+        super().__init__(master)
+        self.on_success = on_success
+        self.title('Login')
+        self.geometry('300x160')
+        self.resizable(False, False)
+        self.configure(bg="#121212")
+
+        tk.Label(self, text='Username', bg="#121212", fg="white").pack(pady=(10,0))
+        self.user_entry = tk.Entry(self, bg="#2b2b2b", fg="white", insertbackground="white")
+        self.user_entry.pack()
+
+        tk.Label(self, text='Password', bg="#121212", fg="white").pack(pady=(10,0))
+        self.pw_entry = tk.Entry(self, show='*', bg="#2b2b2b", fg="white", insertbackground="white")
+        self.pw_entry.pack()
+
+        tk.Button(self, text='Login', bg="#2b2b2b", fg="white",
+                  activebackground="#3a3a3a", command=self.try_login).pack(pady=10)
+
+    def try_login(self):
+        u = self.user_entry.get().strip()
+        p = self.pw_entry.get().strip()
+        if not u or not p:
+            messagebox.showwarning('Input', 'Please enter username and password')
+            return
+        user = db.users.find_one({"username": u, "password": p})
+        if user:
+            self.on_success(u)
+            self.destroy()
+        else:
+            messagebox.showerror('Login Failed', 'Invalid username or password')
+
+
+class InventoryApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title('Inventory App - Tkinter + MongoDB')
+        self.geometry('1000x600')
+        self.configure(bg="#121212")
+
+        self.curr_user = None
+        self.create_widgets()
+        self.apply_dark_theme()
+
+        self.protocol('WM_DELETE_WINDOW', self.on_close)
+        self.show_login()
+
+    def apply_dark_theme(self):
+        style = ttk.Style()
+        style.theme_use("default")
+
+        style.configure("Treeview",
+            background="#1e1e1e",
+            foreground="white",
+            fieldbackground="#1e1e1e",
+            rowheight=25
+        )
+        style.map("Treeview", background=[("selected", "#333333")])
+
+    def show_login(self):
+        self.withdraw()
+        def success(user):
+            self.curr_user = user
+            self.deiconify()
+            self.refresh_products()
+        LoginWindow(self, success)
+
+    def create_widgets(self):
+        frm = tk.Frame(self, bg="#121212")
+        frm.pack(side=tk.TOP, fill=tk.X, padx=10, pady=6)
+
+        labels = ['SKU', 'Name', 'Price', 'Quantity', 'Description']
+        self.entries = {}
+
+        for i, lab in enumerate(labels):
+            tk.Label(frm, text=lab, bg="#121212", fg="white").grid(row=0, column=i*2, padx=2, sticky='w')
+            e = tk.Entry(frm, bg="#2b2b2b", fg="white", insertbackground="white", bd=0)
+            e.grid(row=0, column=i*2+1, padx=2)
+            self.entries[lab.lower()] = e
+
+        def btn(txt, cmd, col):
+            tk.Button(frm, text=txt, command=cmd,
+                      bg="#2b2b2b", fg="white",
+                      activebackground="#3a3a3a").grid(row=1, column=col, pady=6)
+
+        btn('Add Product', self.add_product, 0)
+        btn('Update Product', self.update_product, 1)
+        btn('Delete Product', self.delete_product, 2)
+        btn('Generate QR', self.generate_qr_for_selected, 3)
+
+        tk.Label(frm, text='Search', bg="#121212", fg="white").grid(row=1, column=4, sticky='e')
+
+        self.search_var = tk.StringVar()
+        tk.Entry(frm, textvariable=self.search_var,
+                 bg="#2b2b2b", fg="white", insertbackground="white").grid(row=1, column=5)
+
+        btn('Search', self.search_products, 6)
+        btn('Show All', self.refresh_products, 7)
+
+        tree_frame = tk.Frame(self, bg="#121212")
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+
+        cols = ('id', 'sku', 'name', 'price', 'quantity', 'description')
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show='headings')
+
+        for c in cols:
+            self.tree.heading(c, text=c.title())
+            self.tree.column(c, width=120)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        bill_frame = tk.Frame(self, bg="#1e1e1e", relief=tk.RIDGE, bd=2)
+        bill_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=10, pady=6)
+
+        tk.Label(bill_frame, text='Billing / Sales', bg="#1e1e1e", fg="white").pack()
+
+        self.cart = []
+        self.cart_listbox = tk.Listbox(
+            bill_frame,
+            width=40,
+            bg="#1e1e1e",
+            fg="white",
+            selectbackground="#333333"
+        )
+        self.cart_listbox.pack()
+
+        tk.Button(bill_frame, text='Add Selected to Cart',
+                  command=self.add_selected_to_cart,
+                  bg="#2b2b2b", fg="white").pack(pady=4)
+
+        tk.Button(bill_frame, text='Remove Selected from Cart',
+                  command=self.remove_from_cart,
+                  bg="#2b2b2b", fg="white").pack(pady=4)
+
+        tk.Button(bill_frame, text='Checkout (Create Sale)',
+                  command=self.checkout,
+                  bg="#2b2b2b", fg="white").pack(pady=4)
+
+    # 🔽 ALL LOGIC BELOW UNCHANGED
+
+    def add_product(self):
+        sku = self.entries['sku'].get().strip() or None
+        name = self.entries['name'].get().strip()
+        price = self.entries['price'].get().strip()
+        qty = self.entries['quantity'].get().strip() or '0'
+        desc = self.entries['description'].get().strip() or None
+        if not name or not price:
+            messagebox.showwarning('Input', 'Please enter at least name and price')
+            return
+        try:
+            price_f = float(price)
+            qty_i = int(qty)
+        except ValueError:
+            messagebox.showerror('Input', 'Price must be number and quantity integer')
+            return
+        db.products.insert_one({
+            "sku": sku,
+            "name": name,
+            "price": price_f,
+            "quantity": qty_i,
+            "description": desc
+        })
+        messagebox.showinfo('Success', 'Product added')
+        self.refresh_products()
+
+    def update_product(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Select', 'Please select a product to update from the table')
+            return
+        item = self.tree.item(sel[0])['values']
+        pid = item[0]
+        try:
+            pid_obj = ObjectId(pid)
+        except Exception:
+            messagebox.showerror('ID Error', 'Selected product has invalid ID')
+            return
+        sku = self.entries['sku'].get().strip() or None
+        name = self.entries['name'].get().strip()
+        price = self.entries['price'].get().strip()
+        qty = self.entries['quantity'].get().strip() or '0'
+        desc = self.entries['description'].get().strip() or None
+        if not name or not price:
+            messagebox.showwarning('Input', 'Please enter at least name and price')
+            return
+        try:
+            price_f = float(price)
+            qty_i = int(qty)
+        except ValueError:
+            messagebox.showerror('Input', 'Price must be number and quantity integer')
+            return
+        db.products.update_one({"_id": pid_obj}, {"$set": {
+            "sku": sku,
+            "name": name,
+            "price": price_f,
+            "quantity": qty_i,
+            "description": desc
+        }})
+        messagebox.showinfo('Success', 'Product updated')
+        self.refresh_products()
+
+    def delete_product(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Select', 'Please select a product to delete')
+            return
+        item = self.tree.item(sel[0])['values']
+        pid = item[0]
+        try:
+            pid_obj = ObjectId(pid)
+        except Exception:
+            messagebox.showerror('ID Error', 'Selected product has invalid ID')
+            return
+        if messagebox.askyesno('Confirm', 'Delete selected product?'):
+            db.products.delete_one({"_id": pid_obj})
+            messagebox.showinfo('Deleted', 'Product deleted')
+            self.refresh_products()
+
+    def refresh_products(self):
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        rows = list(db.products.find())
+        for r in rows:
+            pid = str(r.get('_id'))
+            self.tree.insert('', tk.END, values=(pid, r.get('sku'), r.get('name'), r.get('price'), r.get('quantity'), r.get('description')))
+
+    def search_products(self):
+        q = self.search_var.get().strip()
+        if not q:
+            self.refresh_products()
+            return
+        rows = list(db.products.find({"$or": [
+            {"name": {"$regex": q, "$options": "i"}},
+            {"sku": {"$regex": q, "$options": "i"}}
+        ]}))
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        for r in rows:
+            pid = str(r.get('_id'))
+            self.tree.insert('', tk.END, values=(pid, r.get('sku'), r.get('name'), r.get('price'), r.get('quantity'), r.get('description')))
+
+    def on_tree_select(self, event):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        item = self.tree.item(sel[0])['values']
+        self.entries['sku'].delete(0, tk.END)
+        self.entries['sku'].insert(0, item[1])
+        self.entries['name'].delete(0, tk.END)
+        self.entries['name'].insert(0, item[2])
+        self.entries['price'].delete(0, tk.END)
+        self.entries['price'].insert(0, item[3])
+        self.entries['quantity'].delete(0, tk.END)
+        self.entries['quantity'].insert(0, item[4])
+        self.entries['description'].delete(0, tk.END)
+        self.entries['description'].insert(0, item[5])
+
+    def add_selected_to_cart(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Select', 'Select a product to add to cart')
+            return
+        item = self.tree.item(sel[0])['values']
+        available_qty = int(item[4] or 0)
+        if available_qty <= 0:
+            messagebox.showwarning('Stock', 'Product out of stock')
+            return
+        qty = simpledialog.askinteger('Quantity', 'Enter quantity', minvalue=1, maxvalue=available_qty)
+        if not qty:
+            return
+        price_val = float(item[3] or 0)
+        self.cart.append({"id": item[0], "name": item[2], "price": price_val, "qty": qty})
+        self.refresh_cart()
+
+    def refresh_cart(self):
+        self.cart_listbox.delete(0, tk.END)
+        for i, it in enumerate(self.cart, start=1):
+            self.cart_listbox.insert(tk.END, f"{i}. {it['name']} x {it['qty']} @ {it['price']} = {it['price']*it['qty']}")
+
+    def remove_from_cart(self):
+        sel = self.cart_listbox.curselection()
+        if not sel:
+            return
+        del self.cart[sel[0]]
+        self.refresh_cart()
+
+    def checkout(self):
+        if not self.cart:
+            messagebox.showwarning('Cart', 'Cart is empty')
+            return
+        total = sum(item['price'] * item['qty'] for item in self.cart)
+        sale = db.sales.insert_one({"total": total})
+        sale_id = sale.inserted_id
+
+        for item in self.cart:
+            prod_id = ObjectId(item['id'])
+            db.sale_items.insert_one({
+                "sale_id": sale_id,
+                "product_id": prod_id,
+                "qty": item['qty'],
+                "price": item['price']
+            })
+            db.products.update_one({"_id": prod_id}, {"$inc": {"quantity": -item['qty']}})
+
+        self.cart.clear()
+        self.refresh_cart()
+        messagebox.showinfo('Success', f'Sale created. Total = {total}')
+        self.refresh_products()
+
+    def generate_qr_for_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Select', 'Select a product for QR code')
+            return
+        item = self.tree.item(sel[0])['values']
+        qr_data = f"Product: {item[2]}\nPrice: {item[3]}\nQty: {item[4]}"
+        img = qrcode.make(qr_data)
+        img.save('product_qr.png')
+        messagebox.showinfo('QR Generated', 'QR saved as product_qr.png')
+
+    def on_close(self):
+        self.destroy()
+
+
+if __name__ == '__main__':
+    InventoryApp().mainloop()
+```
